@@ -1,0 +1,50 @@
+name: Zara stock check
+
+on:
+  schedule:
+    # Every 30 minutes. Change this cron to adjust cadence (min interval GitHub allows is 5 min).
+    # Examples: "0 */6 * * *" = every 6h, "*/15 * * * *" = every 15 min.
+    - cron: '*/30 * * * *'
+  workflow_dispatch: {}   # lets you run it manually from the Actions tab
+
+concurrency:
+  group: zara-stock-check
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # to commit state.json so alerts don't repeat
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Run stock check
+        env:
+          PRODUCT_URL: ${{ vars.PRODUCT_URL }}
+          SIZES: ${{ vars.SIZES }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+        run: node check.js
+
+      - name: Persist state (so restock alerts don't repeat)
+        if: always()
+        run: |
+          if [ -n "$(git status --porcelain state.json)" ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add state.json
+            git commit -m "chore: update stock state [skip ci]"
+            git push
+          else
+            echo "No state change to commit."
+          fi

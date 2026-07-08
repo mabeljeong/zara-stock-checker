@@ -1,0 +1,15 @@
+{
+  "name": "zara-stock-checker",
+  "version": "1.0.0",
+  "description": "Watches a Zara product for size restocks and emails you when they come back.",
+  "main": "check.js",
+  "scripts": {
+    "check": "node check.js"
+  },
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "nodemailer": "^9.0.3",
+    "playwright": "^1.61.1"
+  }
+}
