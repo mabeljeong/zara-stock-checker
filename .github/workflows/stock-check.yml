@@ -2,9 +2,9 @@ name: Zara stock check
 
 on:
   schedule:
-    # Every 30 minutes. Change this cron to adjust cadence (min interval GitHub allows is 5 min).
-    # Examples: "0 */6 * * *" = every 6h, "*/15 * * * *" = every 15 min.
-    - cron: '*/30 * * * *'
+    # Every 15 minutes. Note: GitHub throttles frequent scheduled jobs, so real gaps run larger.
+    # Examples: "0 */6 * * *" = every 6h, "*/30 * * * *" = every 30 min.
+    - cron: '*/15 * * * *'
   workflow_dispatch: {}   # lets you run it manually from the Actions tab
 
 concurrency:
@@ -36,15 +36,18 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: node check.js
 
-      - name: Persist state (so restock alerts don't repeat)
+      - name: Persist state + weekly keep-alive
         if: always()
         run: |
-          if [ -n "$(git status --porcelain state.json)" ]; then
+          # ISO year-week — changes ~weekly, guaranteeing a commit so GitHub never
+          # auto-pauses this schedule after 60 days of no repo activity.
+          date -u +%G-W%V > .keepalive
+          if [ -n "$(git status --porcelain state.json .keepalive)" ]; then
             git config user.name  "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add state.json
+            git add state.json .keepalive
             git commit -m "chore: update stock state [skip ci]"
             git push
           else
-            echo "No state change to commit."
+            echo "No changes to commit."
           fi
