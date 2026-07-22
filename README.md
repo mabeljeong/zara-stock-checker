@@ -4,7 +4,7 @@ Watches a Zara product page and **emails you** when sold-out sizes (default **XS
 come back in stock. Runs **for free in the cloud via GitHub Actions**, so it works no matter
 which laptop you're on (Mac or Windows) — or whether your laptop is even on.
 
-Currently watching: **[Oversized High Collar Bomber Jacket](https://www.zara.com/us/en/oversized-high-collar-bomber-jacket-p06318042.html)** — sizes XS, S, M.
+Currently watching: **[Faux Leather Cropped Bomber Jacket](https://www.zara.com/us/en/faux-leather-cropped-bomber-jacket-p06318041.html?v1=495675486)** — sizes XS, S, M.
 
 ## How it works
 

@@ -10,7 +10,7 @@ const nodemailer = require('nodemailer');
 // ---------- Config (override via env; sensible defaults for this jacket) ----------
 const PRODUCT_URL =
   process.env.PRODUCT_URL ||
-  'https://www.zara.com/us/en/oversized-high-collar-bomber-jacket-p06318042.html';
+  'https://www.zara.com/us/en/faux-leather-cropped-bomber-jacket-p06318041.html?v1=495675486';
 const TARGET_SIZES = (process.env.SIZES || 'XS,S,M')
   .split(',')
   .map((s) => s.trim().toUpperCase())
