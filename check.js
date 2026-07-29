@@ -1,5 +1,6 @@
 // Zara stock checker — headless Chrome scrape + email alert on restock.
-// Cross-platform (macOS / Windows / Linux / GitHub Actions). No API keys beyond Gmail.
+// Watches any number of products (products.json). Cross-platform (macOS / Windows /
+// Linux / GitHub Actions). No API keys beyond Gmail.
 'use strict';
 
 const fs = require('fs');
@@ -7,15 +8,10 @@ const path = require('path');
 const { chromium } = require('playwright');
 const nodemailer = require('nodemailer');
 
-// ---------- Config (override via env; sensible defaults for this jacket) ----------
-const PRODUCT_URL =
-  process.env.PRODUCT_URL ||
-  'https://www.zara.com/us/en/faux-leather-cropped-bomber-jacket-p06318041.html?v1=495675486';
-const TARGET_SIZES = (process.env.SIZES || 'XS,S,M')
-  .split(',')
-  .map((s) => s.trim().toUpperCase())
-  .filter(Boolean);
+// ---------- Config ----------
+const PRODUCTS_FILE = process.env.PRODUCTS_FILE || path.join(__dirname, 'products.json');
 const STATE_FILE = process.env.STATE_FILE || path.join(__dirname, 'state.json');
+const LIST_ONLY = process.argv.includes('--list'); // print every size found, don't alert
 
 const EMAIL_TO = process.env.EMAIL_TO || '';
 const GMAIL_USER = process.env.GMAIL_USER || '';
@@ -24,6 +20,30 @@ const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD || '';
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
+// Single-product override (back-compat with the old PRODUCT_URL / SIZES env vars).
+function loadProducts() {
+  if (process.env.PRODUCT_URL) {
+    return [
+      {
+        name: process.env.PRODUCT_NAME || process.env.PRODUCT_URL,
+        url: process.env.PRODUCT_URL,
+        sizes: (process.env.SIZES || 'XS,S,M').split(',').map((s) => s.trim()).filter(Boolean),
+      },
+    ];
+  }
+  const raw = JSON.parse(fs.readFileSync(PRODUCTS_FILE, 'utf8'));
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error(`${PRODUCTS_FILE} must be a non-empty array of {name, url, sizes}`);
+  }
+  return raw.map((p) => ({
+    name: p.name || p.url,
+    url: p.url,
+    sizes: (Array.isArray(p.sizes) ? p.sizes : String(p.sizes || '').split(','))
+      .map((s) => String(s).trim())
+      .filter(Boolean),
+  }));
+}
 
 // ---------- Helpers ----------
 
@@ -70,6 +90,19 @@ function parseSizesFromHtml(html) {
   return map;
 }
 
+// Zara labels sizes inconsistently: "M", "25", "25 (US 0)", "US 0". Compare on a
+// stripped form, and also against each comma/paren-separated part of the label so
+// "25" matches "25 (US 0)".
+const norm = (s) => String(s).toUpperCase().replace(/[^A-Z0-9]/g, '');
+function sizeMatches(target, label) {
+  const t = norm(target);
+  if (!t) return false;
+  if (norm(label) === t) return true;
+  return String(label)
+    .split(/[(),/|-]+/)
+    .some((part) => norm(part) === t);
+}
+
 function loadState() {
   try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); }
   catch { return {}; }
@@ -91,8 +124,58 @@ async function sendEmail(subject, text) {
   console.log(`[email] sent to ${EMAIL_TO}: ${subject}`);
 }
 
+// Load one product page and return NAME -> {sku, availability} for every size on it.
+async function scrapeProduct(ctx, url) {
+  const page = await ctx.newPage();
+
+  // Freshest signal: intercept the internal availability API (sku -> availability)
+  const apiAvail = new Map();
+  page.on('response', async (r) => {
+    if (r.url().includes('itxrest') && r.url().includes('/availability')) {
+      try {
+        const j = await r.json();
+        for (const s of j.skusAvailability || []) apiAvail.set(String(s.sku), s.availability);
+      } catch { /* ignore */ }
+    }
+  });
+
+  try {
+    const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    const status = resp && resp.status();
+    if (status && status >= 400) {
+      throw new Error(`page returned HTTP ${status} — likely bot-blocked from this IP.`);
+    }
+    // give the availability XHR a moment to land
+    for (let i = 0; i < 20 && apiAvail.size === 0; i++) await page.waitForTimeout(1000);
+
+    const html = await page.content();
+    const htmlSizes = parseSizesFromHtml(html); // sku -> {name, availability}
+    if (htmlSizes.size === 0) {
+      throw new Error('could not parse any sizes from the page (layout changed?).');
+    }
+
+    // Merge: prefer live API availability, fall back to embedded HTML availability.
+    // Keyed by size name so we report one status per size.
+    const byName = new Map();
+    for (const [sku, info] of htmlSizes) {
+      const availability = apiAvail.get(sku) || info.availability;
+      // if a name appears more than once (multi-color), treat in_stock if any is in stock
+      const prev = byName.get(info.name);
+      const inStock = availability === 'in_stock';
+      if (!prev || (inStock && prev.availability !== 'in_stock')) {
+        byName.set(info.name, { sku, availability });
+      }
+    }
+    return byName;
+  } finally {
+    await page.close();
+  }
+}
+
 // ---------- Main ----------
 (async () => {
+  const products = loadProducts();
+
   // Zara's Akamai bot-check fingerprints Playwright's bundled headless-shell (=> 403),
   // but lets *real* Chrome through. Use the system Chrome channel; fall back to bundled.
   const launchArgs = ['--disable-blink-features=AutomationControlled', '--no-sandbox'];
@@ -108,82 +191,91 @@ async function sendEmail(subject, text) {
     locale: 'en-US',
     viewport: { width: 1280, height: 900 },
   });
-  const page = await ctx.newPage();
-
-  // Freshest signal: intercept the internal availability API (sku -> availability)
-  const apiAvail = new Map();
-  page.on('response', async (r) => {
-    if (r.url().includes('itxrest') && r.url().includes('/availability')) {
-      try {
-        const j = await r.json();
-        for (const s of j.skusAvailability || []) apiAvail.set(String(s.sku), s.availability);
-      } catch { /* ignore */ }
-    }
-  });
-
-  const resp = await page.goto(PRODUCT_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  const status = resp && resp.status();
-  if (status && status >= 400) {
-    console.error(`[fatal] page returned HTTP ${status} — likely bot-blocked from this IP.`);
-    await browser.close();
-    process.exit(2);
-  }
-  // give the availability XHR a moment to land
-  for (let i = 0; i < 20 && apiAvail.size === 0; i++) await page.waitForTimeout(1000);
-
-  const html = await page.content();
-  await browser.close();
-
-  const htmlSizes = parseSizesFromHtml(html); // sku -> {name, availability}
-  if (htmlSizes.size === 0) {
-    console.error('[fatal] could not parse any sizes from the page (layout changed?).');
-    process.exit(3);
-  }
-
-  // Merge: prefer live API availability, fall back to embedded HTML availability.
-  // Keyed by size name so we report one status per target size.
-  const byName = new Map(); // NAME -> {sku, availability}
-  for (const [sku, info] of htmlSizes) {
-    const availability = apiAvail.get(sku) || info.availability;
-    // if a name appears more than once (multi-color), treat in_stock if any is in stock
-    const prev = byName.get(info.name);
-    const inStock = availability === 'in_stock';
-    if (!prev || (inStock && prev.availability !== 'in_stock')) {
-      byName.set(info.name, { sku, availability });
-    }
-  }
 
   const now = new Date().toISOString();
-  console.log(`\n[${now}] ${PRODUCT_URL}`);
-  const rows = TARGET_SIZES.map((name) => {
-    const info = byName.get(name);
-    const availability = info ? info.availability : 'not_found';
-    console.log(`  ${name.padEnd(4)} ${availability}`);
-    return { name, availability, sku: info ? info.sku : null };
-  });
-
-  // Alert only on transition into in_stock (dedupe across runs via state file).
   const state = loadState();
-  const restocked = [];
-  for (const row of rows) {
-    const key = `${PRODUCT_URL}#${row.name}`;
-    const prev = state[key];
-    if (row.availability === 'in_stock' && prev !== 'in_stock') restocked.push(row);
-    state[key] = row.availability;
+  const restocksByProduct = [];
+  const failures = [];
+
+  for (const product of products) {
+    console.log(`\n[${now}] ${product.name}\n  ${product.url}`);
+
+    let byName;
+    try {
+      byName = await scrapeProduct(ctx, product.url);
+    } catch (e) {
+      console.error(`  [fail] ${e.message}`);
+      failures.push(`${product.name}: ${e.message}`);
+      continue;
+    }
+
+    if (LIST_ONLY) {
+      for (const [name, info] of byName) console.log(`  ${name.padEnd(12)} ${info.availability}`);
+      continue;
+    }
+
+    const rows = product.sizes.map((target) => {
+      let match = null;
+      for (const [name, info] of byName) {
+        if (!sizeMatches(target, name)) continue;
+        // prefer an in-stock match if the label appears more than once
+        if (!match || (info.availability === 'in_stock' && match.availability !== 'in_stock')) {
+          match = { label: name, ...info };
+        }
+      }
+      const availability = match ? match.availability : 'not_found';
+      console.log(`  ${target.padEnd(6)} ${availability}${match && match.label !== target.toUpperCase() ? `  (label: ${match.label})` : ''}`);
+      if (availability === 'not_found') {
+        console.log(`         sizes on page: ${[...byName.keys()].join(', ') || '(none)'}`);
+      }
+      return { target, availability };
+    });
+
+    // Alert only on transition into in_stock (dedupe across runs via state file).
+    const restocked = [];
+    for (const row of rows) {
+      const key = `${product.url}#${row.target.toUpperCase()}`;
+      const prev = state[key];
+      if (row.availability === 'in_stock' && prev !== 'in_stock') restocked.push(row);
+      state[key] = row.availability;
+    }
+    if (restocked.length) restocksByProduct.push({ product, restocked });
   }
+
+  await browser.close();
+
+  if (LIST_ONLY) return;
+
   saveState(state);
 
-  if (restocked.length) {
-    const sizesStr = restocked.map((r) => r.name).join(', ');
-    const subject = `🎉 Zara restock: ${sizesStr} back in stock`;
+  if (restocksByProduct.length) {
+    const allSizes = restocksByProduct
+      .map((r) => `${r.product.name} (${r.restocked.map((x) => x.target).join(', ')})`)
+      .join('; ');
+    const subject = `🎉 Zara restock: ${allSizes}`;
     const text =
-      `These sizes just came back in stock:\n\n` +
-      restocked.map((r) => `  • ${r.name}`).join('\n') +
-      `\n\nBuy now: ${PRODUCT_URL}\n\n(Checked ${now})`;
-    console.log(`\n[ALERT] Restocked: ${sizesStr}`);
+      restocksByProduct
+        .map(
+          (r) =>
+            `${r.product.name}\n` +
+            r.restocked.map((x) => `  • ${x.target}`).join('\n') +
+            `\n  Buy now: ${r.product.url}`
+        )
+        .join('\n\n') + `\n\n(Checked ${now})`;
+    console.log(`\n[ALERT] Restocked: ${allSizes}`);
     await sendEmail(subject, text);
   } else {
-    console.log(`\nNo target sizes newly in stock. Watching: ${TARGET_SIZES.join(', ')}`);
+    console.log(
+      `\nNo target sizes newly in stock. Watching: ` +
+        products.map((p) => `${p.name} [${p.sizes.join(', ')}]`).join(' | ')
+    );
+  }
+
+  // Surface scrape failures as a non-zero exit so the Actions run goes red, but only
+  // after state for the products that *did* work has been saved.
+  if (failures.length) {
+    console.error(`\n[fatal] ${failures.length} product(s) failed:\n  ${failures.join('\n  ')}`);
+    process.exit(2);
   }
 })().catch((e) => {
   console.error('[error]', e && e.message ? e.message : e);

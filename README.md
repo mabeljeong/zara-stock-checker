@@ -4,13 +4,19 @@ Watches a Zara product page and **emails you** when sold-out sizes (default **XS
 come back in stock. Runs **for free in the cloud via GitHub Actions**, so it works no matter
 which laptop you're on (Mac or Windows) — or whether your laptop is even on.
 
-Currently watching: **[Faux Leather Cropped Bomber Jacket](https://www.zara.com/us/en/faux-leather-cropped-bomber-jacket-p06318041.html?v1=495675486)** — sizes XS, S, M.
+Currently watching (see [products.json](products.json)):
+
+| Product | Sizes |
+|---------|-------|
+| [Faux Leather Cropped Bomber Jacket](https://www.zara.com/us/en/faux-leather-cropped-bomber-jacket-p06318041.html?v1=495675486) | XS, S, M |
+| [Multi-Pocket Cargo Pants](https://www.zara.com/us/en/multi-pocket-cargo-pants-p03607021.html?v1=503389715) | 25 (US 0) |
 
 ## How it works
 
-1. Every 30 minutes, GitHub runs `check.js` on its own servers.
-2. The script opens the Zara page in **real headless Chrome** (Zara blocks plain bots; real
-   Chrome gets through), reads the live stock status for each size.
+1. Every 15 minutes, GitHub runs `check.js` on its own servers.
+2. For each product in `products.json` the script opens the Zara page in **real headless
+   Chrome** (Zara blocks plain bots; real Chrome gets through) and reads the live stock
+   status for each size.
 3. If a watched size flips from *out of stock* → *in stock*, it emails you via Gmail.
 4. A small `state.json` is committed each time so you only get **one** email per restock,
    not one every 30 minutes.
@@ -42,11 +48,7 @@ Repo → **Settings → Secrets and variables → Actions**:
 | `GMAIL_APP_PASSWORD` | the 16-char app password from step 2 |
 | `EMAIL_TO` | where alerts go — e.g. `a24558023@gmail.com` |
 
-**Variables** (tab "Variables", optional — defaults are baked in):
-| Name | Value |
-|------|-------|
-| `PRODUCT_URL` | a different Zara product URL to watch |
-| `SIZES` | comma-separated sizes, e.g. `XS,S,M` |
+No repo **Variables** are needed — the watch list lives in `products.json`.
 
 ### 4. Turn it on & test
 - Repo → **Actions** tab → enable workflows if prompted.
@@ -64,9 +66,23 @@ Edit the `cron` line in [.github/workflows/stock-check.yml](.github/workflows/st
 reappears for minutes). More frequent = better catch rate, and it's free. 15–30 min is a good
 sweet spot; 6h will miss most return-driven restocks.
 
-## Watching more than one product
-Duplicate the repo, or extend `SIZES`/`PRODUCT_URL`. (For multiple products at once, ask and
-I'll add a small `products.json` loop.)
+## Adding / removing products
+Edit [products.json](products.json) and push. Each entry is:
+```json
+{
+  "name": "Multi-Pocket Cargo Pants",
+  "url": "https://www.zara.com/us/en/multi-pocket-cargo-pants-p03607021.html?v1=503389715",
+  "sizes": ["25"]
+}
+```
+Sizes match loosely, so for a label like `25 (US 0)` any of `"25"`, `"US 0"`, or the full
+`"25 (US 0)"` works. If a size can't be matched the log prints `not_found` along with every
+size the page actually offers, so you can copy the right one.
+
+To see all sizes on the pages you're watching:
+```bash
+node check.js --list
+```
 
 ## Run it locally instead (quick test)
 Requires Node 18+ and **Google Chrome installed**:
@@ -76,6 +92,11 @@ npx playwright install chromium   # fallback browser; real Chrome is used automa
 EMAIL_TO=you@gmail.com GMAIL_USER=you@gmail.com GMAIL_APP_PASSWORD=xxxx node check.js
 ```
 Without the email vars it just prints stock status to the terminal.
+
+To check a one-off product without touching `products.json`, the old env vars still work:
+```bash
+PRODUCT_URL='https://www.zara.com/...' SIZES='S,M' node check.js
+```
 
 ## Notes / limitations
 - Relies on GitHub's Ubuntu runners having Google Chrome preinstalled (they do).
